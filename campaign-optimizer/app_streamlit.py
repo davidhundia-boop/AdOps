@@ -5,7 +5,14 @@ and download the color-coded Excel report.
 """
 
 import os
+import sys
 import tempfile
+
+# Ensure app directory is on path when run from repo root (e.g. Streamlit Community Cloud)
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+
 import streamlit as st
 from optimizer import run_optimization, col_letter_to_idx
 
