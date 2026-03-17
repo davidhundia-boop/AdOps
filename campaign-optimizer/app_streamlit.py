@@ -15,6 +15,7 @@ if _APP_DIR not in sys.path:
 
 import streamlit as st
 from optimizer import run_optimization, col_letter_to_idx
+from appsflyer_tracking import AppsFlyerTrackingLink, parse_tracking_link, generate_test_link
 
 st.set_page_config(
     page_title="Campaign Optimizer",
@@ -255,3 +256,204 @@ if run_clicked and files_ready:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
     )
+
+# ---------------------------------------------------------------------------
+# AppsFlyer Tracking Link Tools
+# ---------------------------------------------------------------------------
+st.divider()
+with st.expander("🔗 AppsFlyer Tracking Link Tools", expanded=False):
+    st.markdown("**Parse, generate, and test AppsFlyer tracking links**")
+    
+    tab1, tab2, tab3 = st.tabs(["Parse & Analyze", "Generate Test Link", "Create New Link"])
+    
+    with tab1:
+        st.markdown("##### Parse Tracking Link")
+        st.caption("Paste an AppsFlyer tracking link to analyze its parameters and validate it.")
+        
+        tracking_url_input = st.text_area(
+            "Tracking Link URL",
+            placeholder="https://app.appsflyer.com/com.example.app?pid=partner_int&c=campaign_name&...",
+            height=100,
+            key="parse_url",
+            label_visibility="collapsed",
+        )
+        
+        if st.button("🔍 Analyze Link", key="btn_analyze"):
+            if tracking_url_input.strip():
+                try:
+                    link = parse_tracking_link(tracking_url_input)
+                    summary = link.get_summary()
+                    validation = link.validate()
+                    
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.markdown("**Link Summary**")
+                        st.write(f"**App ID:** `{summary['app_id']}`")
+                        st.write(f"**Partner ID:** `{summary['partner_id']}`")
+                        st.write(f"**Campaign:** `{summary['campaign']}`")
+                        st.write(f"**Campaign ID:** `{summary['campaign_id']}`")
+                        st.write(f"**Site ID:** `{summary['site_id']}`")
+                        st.write(f"**Partner:** `{summary['partner']}`")
+                        st.write(f"**Lookback:** `{summary['click_lookback']}`")
+                    
+                    with col_b:
+                        st.markdown("**Validation**")
+                        if validation['valid']:
+                            st.success("✓ Link is valid")
+                        else:
+                            st.error("✗ Link has issues")
+                            for issue in validation['issues']:
+                                st.write(f"- {issue}")
+                        
+                        if validation['warnings']:
+                            st.warning("Warnings:")
+                            for warning in validation['warnings']:
+                                st.write(f"- {warning}")
+                        
+                        if summary['placeholders']:
+                            st.info(f"Placeholders found: {', '.join(summary['placeholders'])}")
+                    
+                    with st.expander("All Parameters", expanded=False):
+                        st.json(link.params)
+                    
+                except Exception as e:
+                    st.error(f"Error parsing link: {str(e)}")
+            else:
+                st.warning("Please enter a tracking link URL")
+    
+    with tab2:
+        st.markdown("##### Generate Test Link")
+        st.caption("Create a test tracking link with a device ID for attribution testing.")
+        
+        test_url_input = st.text_area(
+            "Template Tracking Link",
+            placeholder="Paste your tracking link template here...",
+            height=80,
+            key="test_url",
+            label_visibility="collapsed",
+        )
+        
+        col_t1, col_t2 = st.columns(2)
+        with col_t1:
+            device_id_input = st.text_input(
+                "Device ID (GAID/IDFA)",
+                placeholder="e.g., 65a53a0f-87a1-43aa-9df8-da3ed7f6c954",
+                key="device_id",
+                help="The advertising ID of the test device",
+            )
+        with col_t2:
+            test_param_input = st.text_input(
+                "Test Parameter (af_sub1)",
+                placeholder="e.g., Onurthegamer",
+                key="test_param",
+                help="Custom test identifier added as af_sub1",
+            )
+        
+        st.markdown("**Placeholder Replacements** (optional)")
+        st.caption("Replace placeholders like [SITE_ID], [CAMPAIGN_NAME] with actual values")
+        
+        col_r1, col_r2, col_r3 = st.columns(3)
+        with col_r1:
+            replace_site_id = st.text_input("SITE_ID", key="replace_site_id")
+        with col_r2:
+            replace_campaign = st.text_input("CAMPAIGN_NAME", key="replace_campaign")
+        with col_r3:
+            replace_campaign_id = st.text_input("CAMPAIGN_ID", key="replace_campaign_id")
+        
+        if st.button("🧪 Generate Test Link", key="btn_test"):
+            if test_url_input.strip() and device_id_input.strip():
+                try:
+                    replacements = {}
+                    if replace_site_id:
+                        replacements['SITE_ID'] = replace_site_id
+                    if replace_campaign:
+                        replacements['CAMPAIGN_NAME'] = replace_campaign
+                    if replace_campaign_id:
+                        replacements['CAMPAIGN_ID'] = replace_campaign_id
+                    
+                    test_link = generate_test_link(
+                        url=test_url_input,
+                        device_id=device_id_input,
+                        test_param=test_param_input if test_param_input else None,
+                        replacements=replacements if replacements else None,
+                    )
+                    
+                    st.success("Test link generated!")
+                    st.code(test_link, language=None)
+                    
+                    st.markdown(f"[Open Test Link]({test_link})")
+                    
+                except Exception as e:
+                    st.error(f"Error generating test link: {str(e)}")
+            else:
+                st.warning("Please enter both a tracking link template and device ID")
+    
+    with tab3:
+        st.markdown("##### Create New Tracking Link")
+        st.caption("Build a new AppsFlyer tracking link from campaign parameters.")
+        
+        col_n1, col_n2 = st.columns(2)
+        with col_n1:
+            new_app_id = st.text_input(
+                "App ID (Package/Bundle)",
+                placeholder="com.example.app",
+                key="new_app_id",
+            )
+            new_campaign_name = st.text_input(
+                "Campaign Name",
+                placeholder="DT_Motorola",
+                key="new_campaign_name",
+            )
+            new_site_id = st.text_input(
+                "Site ID",
+                placeholder="12345",
+                key="new_site_id",
+            )
+        
+        with col_n2:
+            new_partner_id = st.text_input(
+                "Partner ID (pid)",
+                value="onedigitalturbine_int",
+                key="new_partner_id",
+            )
+            new_campaign_id = st.text_input(
+                "Campaign ID",
+                placeholder="49378",
+                key="new_campaign_id",
+            )
+            new_partner_name = st.text_input(
+                "Partner Name (af_prt)",
+                placeholder="affinityveve",
+                key="new_partner_name",
+            )
+        
+        new_lookback = st.selectbox(
+            "Click Lookback Window",
+            options=["7d", "1d", "3d", "14d", "30d"],
+            index=0,
+            key="new_lookback",
+        )
+        
+        if st.button("🔗 Create Tracking Link", key="btn_create"):
+            if new_app_id and new_campaign_name and new_campaign_id and new_site_id:
+                try:
+                    link = AppsFlyerTrackingLink.from_campaign_data(
+                        app_id=new_app_id,
+                        campaign_name=new_campaign_name,
+                        campaign_id=new_campaign_id,
+                        site_id=new_site_id,
+                        partner_id=new_partner_id,
+                        partner_name=new_partner_name,
+                        click_lookback=new_lookback,
+                    )
+                    
+                    generated_url = link.generate()
+                    st.success("Tracking link created!")
+                    st.code(generated_url, language=None)
+                    
+                    st.markdown(f"[Open Link]({generated_url})")
+                    
+                except Exception as e:
+                    st.error(f"Error creating link: {str(e)}")
+            else:
+                st.warning("Please fill in all required fields: App ID, Campaign Name, Campaign ID, and Site ID")
