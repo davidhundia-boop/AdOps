@@ -2,6 +2,10 @@
 Campaign optimizer backend — Digital Turbine preload pipeline.
 Implements full rules: data prep, segmentation, progression, discard rules,
 daily cap logic, bid optimization, and color-coded Excel output.
+
+NOTE: "Optimization Suggestions" refers to activating this optimizer.py module only.
+- site_performance = internal file (Excel .xlsx)
+- DT_DX = client file with performance data (CSV)
 """
 
 from io import BytesIO
