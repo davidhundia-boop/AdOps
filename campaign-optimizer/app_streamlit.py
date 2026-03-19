@@ -14,7 +14,7 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 import streamlit as st
-from optimizer import run_optimization, col_letter_to_idx
+from optimizer import run_optimization, col_letter_to_idx, col_name_or_letter_to_idx
 
 st.set_page_config(
     page_title="Campaign Optimizer",
@@ -77,38 +77,76 @@ st.divider()
 # ---------------------------------------------------------------------------
 st.markdown("### 2 Set Your KPI Goals")
 
+# Preset configurations for common campaigns
+PRESETS = {
+    "Custom": {
+        "kpi_mode": "roi",
+        "main_col": "I",
+        "main_target": 10.0,
+        "secondary_col": "K",
+        "secondary_target": 5.0,
+        "weight_main": 80,
+    },
+    "Domino Dreams - ROAS D7": {
+        "kpi_mode": "roas",
+        "main_col": "Domino Dreams Marketing Campaigns Daily Metrics Full ROAS D7",
+        "main_target": 2.18,
+        "secondary_col": "K",
+        "secondary_target": 2.0,
+        "weight_main": 100,
+    },
+}
+
+preset_choice = st.selectbox(
+    "Campaign preset",
+    options=list(PRESETS.keys()),
+    index=0,
+    help="Select a preset configuration for common campaigns, or choose 'Custom' to configure manually.",
+)
+preset = PRESETS[preset_choice]
+
+# KPI Mode selection
+kpi_mode = st.radio(
+    "KPI Type",
+    options=["ROI (percentage)", "ROAS (ratio)"],
+    index=0 if preset["kpi_mode"] == "roi" else 1,
+    horizontal=True,
+    help="ROI is expressed as percentage (e.g., 10% = 0.10). ROAS is a ratio (e.g., 2.18% means $0.0218 return per $1 spent).",
+)
+kpi_mode_value = "roi" if "ROI" in kpi_mode else "roas"
+
 k1, k2 = st.columns(2)
 with k1:
-    main_col_letter = st.text_input(
-        "Column letter in the CSV (e.g. I)",
-        value="I",
-        max_chars=2,
+    st.caption("**Primary KPI (D7)**")
+    main_col_spec = st.text_input(
+        "Column letter or name pattern",
+        value=preset["main_col"],
         key="main_col",
-        help="Primary KPI column (e.g. ROI D7). Single letter A–Z.",
-    ).strip().upper() or "I"
+        help="Column letter (e.g. 'I') or partial column name (e.g. 'ROAS D7' or 'Domino Dreams').",
+    ).strip()
     main_target = st.number_input(
         "Target (%)",
         min_value=0.0,
-        max_value=100.0,
-        value=10.0,
+        max_value=1000.0,
+        value=preset["main_target"],
         step=0.01,
         format="%.2f",
         key="main_target",
-        help="Target percentage for the primary KPI.",
+        help="Target percentage for the primary KPI. For ROAS, 2.18 means 2.18%.",
     )
 with k2:
-    secondary_col_letter = st.text_input(
-        "Column letter in the CSV (e.g. K)",
-        value="K",
-        max_chars=2,
+    st.caption("**Secondary KPI (D14/D30)**")
+    secondary_col_spec = st.text_input(
+        "Column letter or name pattern",
+        value=preset["secondary_col"],
         key="secondary_col",
-        help="Secondary KPI column (e.g. ROI D14 or D30). Single letter A–Z.",
-    ).strip().upper() or "K"
+        help="Column letter (e.g. 'K') or partial column name (e.g. 'ROAS D14').",
+    ).strip()
     secondary_target = st.number_input(
         "Target (%)",
         min_value=0.0,
-        max_value=100.0,
-        value=5.0,
+        max_value=1000.0,
+        value=preset["secondary_target"],
         step=0.01,
         format="%.2f",
         key="secondary_target",
@@ -120,7 +158,7 @@ weight_main = st.slider(
     "Main KPI weight",
     min_value=0,
     max_value=100,
-    value=80,
+    value=preset["weight_main"],
     step=5,
     key="weight_slider",
     label_visibility="collapsed",
@@ -174,26 +212,18 @@ else:
     run_clicked = st.button("🚀 Run Optimization", type="primary", use_container_width=True)
 
 if run_clicked and files_ready:
-    # Validate column letters and targets
-    def valid_col(c, name):
-        c = (c or "").strip().upper()
-        if len(c) != 1 or not c.isalpha():
-            st.error(f"{name} must be a single letter A–Z.")
-            return None
-        return c
-
-    main_col = valid_col(main_col_letter, "Main KPI column")
-    secondary_col = valid_col(secondary_col_letter, "Secondary KPI column")
-    if main_col is None or secondary_col is None:
+    # Validate column specs and targets
+    if not main_col_spec:
+        st.error("Main KPI column specification is required.")
         st.stop()
-    if main_target <= 0 or secondary_target <= 0:
-        st.error("KPI targets must be greater than 0.")
+    if not secondary_col_spec:
+        st.error("Secondary KPI column specification is required.")
         st.stop()
-    try:
-        kpi_col_d7_idx = col_letter_to_idx(main_col)
-        kpi_col_d2nd_idx = col_letter_to_idx(secondary_col)
-    except ValueError as e:
-        st.error(str(e))
+    if main_target <= 0:
+        st.error("Main KPI target must be greater than 0.")
+        st.stop()
+    if secondary_target <= 0 and weight_secondary > 0:
+        st.error("Secondary KPI target must be greater than 0 when secondary weight is used.")
         st.stop()
 
     with st.spinner("Running optimization…"):
@@ -209,13 +239,17 @@ if run_clicked and files_ready:
             output_bytes, summary = run_optimization(
                 internal_file=internal_path,
                 advertiser_file=advertiser_path,
-                kpi_col_d7_idx=kpi_col_d7_idx,
-                kpi_col_d2nd_idx=kpi_col_d2nd_idx,
                 kpi_d7_pct=main_target,
                 kpi_d2nd_pct=secondary_target,
                 weight_main=weight_main / 100.0,
                 weight_secondary=weight_secondary / 100.0,
+                kpi_col_d7_spec=main_col_spec,
+                kpi_col_d2nd_spec=secondary_col_spec,
+                kpi_mode=kpi_mode_value,
             )
+        except ValueError as e:
+            st.error(f"Error: {e}")
+            st.stop()
         finally:
             for p in (internal_path, advertiser_path):
                 if p and os.path.isfile(p):
@@ -224,13 +258,15 @@ if run_clicked and files_ready:
                     except OSError:
                         pass
 
-    st.success(f"Done! {summary.get('rows_actioned', 0)} sites actioned.")
+    kpi_mode_label = "ROAS" if summary.get("kpi_mode") == "roas" else "ROI"
+    st.success(f"Done! {summary.get('rows_actioned', 0)} sites actioned using {kpi_mode_label} mode.")
     a, b, c, d, e = st.columns(5)
     a.metric("Total sites", summary.get("total_rows", 0))
     b.metric("Sites actioned", summary.get("rows_actioned", 0))
     c.metric("Sites disregarded", summary.get("rows_disregarded", 0))
     d.metric("Daily cap suggestions", summary.get("rows_with_cap", 0))
-    e.metric("KPI column", summary.get("roi_d2nd_col", "–"))
+    kpi_d7_target = summary.get("kpi_d7_target", 0)
+    e.metric(f"D7 Target ({kpi_mode_label})", f"{kpi_d7_target:.2%}")
     ab = summary.get("action_breakdown") or {}
     sb = summary.get("segment_breakdown") or {}
     t1, t2 = st.columns(2)
