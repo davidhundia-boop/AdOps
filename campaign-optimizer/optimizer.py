@@ -2,6 +2,10 @@
 Campaign optimizer backend — Digital Turbine preload pipeline.
 Implements full rules: data prep, segmentation, progression, discard rules,
 daily cap logic, bid optimization, and color-coded Excel output.
+
+NOTE: "Optimization Suggestions" refers to activating this optimizer.py module only.
+- site_performance = internal file (Excel .xlsx)
+- DT_DX = client file with performance data (CSV)
 """
 
 from io import BytesIO
@@ -34,11 +38,51 @@ def _find_col(df, *candidates):
 
 
 def col_letter_to_idx(letter):
-    """Convert Excel column letter (A–Z) to 0-based index. A=0, B=1, …"""
+    """Convert Excel column letter (A–Z, AA–AZ, etc.) to 0-based index. A=0, B=1, …, Z=25, AA=26, AB=27, …"""
     letter = str(letter).strip().upper()
-    if len(letter) != 1 or not letter.isalpha():
-        raise ValueError(f"Column must be a single letter A–Z, got: {letter!r}")
-    return ord(letter) - ord("A")
+    if not letter or not all(c.isalpha() for c in letter):
+        raise ValueError(f"Column must be letters A–Z or AA–AZ etc., got: {letter!r}")
+    idx = 0
+    for c in letter:
+        idx = idx * 26 + (ord(c) - ord("A") + 1)
+    return idx - 1
+
+
+def find_col_by_pattern(df, pattern):
+    """
+    Find a column in df that contains the given pattern (case-insensitive).
+    Returns the column name if found, else None.
+    """
+    pattern_lower = pattern.lower().strip()
+    for col in df.columns:
+        if pattern_lower in str(col).lower():
+            return col
+    return None
+
+
+def col_name_or_letter_to_idx(df, col_spec):
+    """
+    Convert column specification to 0-based index.
+    col_spec can be:
+      - A single letter (A–Z) or multi-letter (AA–AZ) for Excel-style column index
+      - A column name or partial name to search for
+    Returns (index, column_name) tuple.
+    """
+    col_spec = str(col_spec).strip()
+    
+    # Check if it looks like an Excel column letter (all letters, 1-3 chars)
+    if col_spec.isalpha() and len(col_spec) <= 3:
+        idx = col_letter_to_idx(col_spec)
+        if idx < len(df.columns):
+            return idx, df.columns[idx]
+        raise ValueError(f"Column letter {col_spec} is out of range (file has {len(df.columns)} columns)")
+    
+    # Otherwise, search by name pattern
+    col_name = find_col_by_pattern(df, col_spec)
+    if col_name:
+        return df.columns.get_loc(col_name), col_name
+    
+    raise ValueError(f"Could not find column matching '{col_spec}' in the file")
 
 
 def _parse_pct(val):
@@ -58,6 +102,42 @@ def _parse_pct(val):
         return x / 100.0 if x > 1 else x
     except ValueError:
         return np.nan
+
+
+def _parse_roas(val):
+    """
+    Parse ROAS value (e.g. '2.18%', '2.18', '218%') to a ratio.
+    ROAS is typically expressed as a ratio (e.g., 2.18 means $2.18 return per $1 spent).
+    
+    Rules:
+    - If value has '%' and is > 1 after removing %, treat as percentage (218% -> 2.18)
+    - If value has '%' and is <= 1 after removing %, treat as actual percentage (2.18% -> 0.0218)
+    - If numeric and > 10, assume it's a percentage representation (218 -> 2.18)
+    - If numeric and <= 10, assume it's already a ratio (2.18 -> 2.18)
+    """
+    if pd.isna(val):
+        return np.nan
+    
+    s = str(val).strip()
+    if not s:
+        return np.nan
+    
+    has_pct = '%' in s
+    s = s.replace("%", "").replace(",", ".").strip()
+    
+    try:
+        x = float(s)
+    except ValueError:
+        return np.nan
+    
+    if has_pct:
+        # If it had a % sign, convert from percentage to ratio
+        return x / 100.0
+    else:
+        # No % sign - if > 10, assume it's percentage representation
+        if x > 10:
+            return x / 100.0
+        return x
 
 
 # --- Excluded site types ---
@@ -111,16 +191,32 @@ def _ensure_key(df, campaign_col, site_id_col):
 def run_optimization(
     internal_file,
     advertiser_file,
-    kpi_col_d7_idx,
-    kpi_col_d2nd_idx,
-    kpi_d7_pct,
-    kpi_d2nd_pct,
+    kpi_col_d7_idx=None,
+    kpi_col_d2nd_idx=None,
+    kpi_d7_pct=None,
+    kpi_d2nd_pct=None,
     weight_main=0.80,
     weight_secondary=0.20,
+    kpi_col_d7_spec=None,
+    kpi_col_d2nd_spec=None,
+    kpi_mode="roi",
 ):
     """
     Run the full optimization pipeline.
     Returns (output_bytes: BytesIO, summary: dict).
+    
+    Parameters:
+    - internal_file: Path to internal campaign data (Excel .xlsx)
+    - advertiser_file: Path to advertiser performance report (CSV)
+    - kpi_col_d7_idx: (deprecated) 0-based column index for D7 KPI
+    - kpi_col_d2nd_idx: (deprecated) 0-based column index for secondary KPI
+    - kpi_d7_pct: Target for D7 KPI (as percentage, e.g., 2.18 for 2.18%)
+    - kpi_d2nd_pct: Target for secondary KPI (as percentage)
+    - weight_main: Weight for D7 KPI (0-1)
+    - weight_secondary: Weight for secondary KPI (0-1)
+    - kpi_col_d7_spec: Column letter (e.g., 'I') or name pattern (e.g., 'ROAS D7') for D7 KPI
+    - kpi_col_d2nd_spec: Column letter or name pattern for secondary KPI
+    - kpi_mode: 'roi' (percentage-based) or 'roas' (ratio-based)
     """
     weight_main = float(weight_main)
     weight_secondary = float(weight_secondary)
@@ -129,6 +225,12 @@ def run_optimization(
 
     internal = _load_internal(internal_file)
     advertiser = _load_advertiser(advertiser_file, kpi_col_d7_idx, kpi_col_d2nd_idx)
+    
+    # Resolve column specifications to indices
+    if kpi_col_d7_spec is not None:
+        kpi_col_d7_idx, d7_col_resolved = col_name_or_letter_to_idx(advertiser, kpi_col_d7_spec)
+    if kpi_col_d2nd_spec is not None:
+        kpi_col_d2nd_idx, d2nd_col_resolved = col_name_or_letter_to_idx(advertiser, kpi_col_d2nd_spec)
 
     # --- Internal: column names ---
     campaign_col = _find_col(internal, "campaignName", "campaign_name")
@@ -161,8 +263,13 @@ def run_optimization(
     d2nd_col_name = advertiser.columns[kpi_col_d2nd_idx]
     roi_d2nd_label = d2nd_col_name  # e.g. "ROI D30" or "ROI D14"
 
-    advertiser["ROI D7"] = advertiser.iloc[:, kpi_col_d7_idx].apply(_parse_pct)
-    advertiser["ROI D2nd"] = advertiser.iloc[:, kpi_col_d2nd_idx].apply(_parse_pct)
+    # Parse KPI values based on mode
+    if kpi_mode == "roas":
+        advertiser["ROI D7"] = advertiser.iloc[:, kpi_col_d7_idx].apply(_parse_roas)
+        advertiser["ROI D2nd"] = advertiser.iloc[:, kpi_col_d2nd_idx].apply(_parse_roas)
+    else:
+        advertiser["ROI D7"] = advertiser.iloc[:, kpi_col_d7_idx].apply(_parse_pct)
+        advertiser["ROI D2nd"] = advertiser.iloc[:, kpi_col_d2nd_idx].apply(_parse_pct)
     merge_cols = ["Key", "ROI D7", "ROI D2nd"]
     advertiser_merge = advertiser[merge_cols].drop_duplicates(subset=["Key"], keep="first")
 
@@ -213,9 +320,15 @@ def run_optimization(
     site_id_col = "siteId" if "siteId" in internal.columns else site_id_col
     site_name_col = "siteName" if "siteName" in internal.columns else site_name_col
 
-    # Ensure numeric columns
-    kpi_d7 = float(kpi_d7_pct) / 100.0
-    kpi_d2nd = float(kpi_d2nd_pct) / 100.0
+    # Ensure numeric columns and calculate target based on mode
+    if kpi_mode == "roas":
+        # For ROAS mode, the target is entered as percentage (e.g., 2.18 means 2.18% = 0.0218)
+        kpi_d7 = float(kpi_d7_pct) / 100.0
+        kpi_d2nd = float(kpi_d2nd_pct) / 100.0 if kpi_d2nd_pct else kpi_d7
+    else:
+        # For ROI mode, target is percentage (e.g., 10 means 10% = 0.10)
+        kpi_d7 = float(kpi_d7_pct) / 100.0
+        kpi_d2nd = float(kpi_d2nd_pct) / 100.0 if kpi_d2nd_pct else kpi_d7
     target = weight_main * kpi_d7 + weight_secondary * kpi_d2nd
 
     internal["score"] = weight_main * internal["ROI D7"].astype(float) + weight_secondary * internal["ROI D2nd"].astype(float)
@@ -483,12 +596,16 @@ def run_optimization(
         internal.at[i, "Action"] = act
         internal.at[i, "Recommended bid"] = rec
 
+    # Determine KPI column labels based on mode
+    kpi_d7_label = "ROAS D7" if kpi_mode == "roas" else "ROI D7"
+    kpi_d2nd_label = "ROAS D2nd" if kpi_mode == "roas" else "ROI D2nd"
+    
     # Output columns order
     out_cols = [
         "Key", "campaignId", "campaignName", "siteId", "siteName", "status", "spend", "preloads",
         "maxPreloads", "fillRate", "installs", "cvr", "ecpp", "ecpi", "bidFloorGroupName",
         "effectiveBidFloor", "bidRate", "dailyCap", "lowTier", "midTier", "highTier",
-        "ROI D7", "ROI D2nd", "Action", "Recommended bid", "Daily Cap Suggestion",
+        kpi_d7_label, kpi_d2nd_label, "Action", "Recommended bid", "Daily Cap Suggestion",
     ]
     # Map from our names to output; use first available
     id_col = _find_col(internal, "campaignId", "campaign_id") or campaign_col
@@ -534,8 +651,8 @@ def run_optimization(
             "lowTier": _get(internal, row, lt_col),
             "midTier": _get(internal, row, mt_col),
             "highTier": _get(internal, row, ht_col),
-            "ROI D7": row["ROI D7"],
-            "ROI D2nd": row["ROI D2nd"],
+            kpi_d7_label: row["ROI D7"],
+            kpi_d2nd_label: row["ROI D2nd"],
             "Action": row["Action"],
             "Recommended bid": row["Recommended bid"],
             "Daily Cap Suggestion": row["Daily Cap Suggestion"],
@@ -575,7 +692,7 @@ def run_optimization(
                 if col_name == "Daily Cap Suggestion":
                     cell.fill = PatternFill(start_color=DAILY_CAP_FILL, end_color=DAILY_CAP_FILL, fill_type="solid")
                     cell.font = Font(name="Arial", size=9, bold=True)
-                elif not discarded and seg and col_name in ("ROI D7", "ROI D2nd", "Action", "Recommended bid"):
+                elif not discarded and seg and col_name in (kpi_d7_label, kpi_d2nd_label, "Action", "Recommended bid"):
                     color = SEGMENT_COLORS.get(seg, "FFFFFF")
                     cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
                 elif not discarded and seg:
@@ -588,7 +705,7 @@ def run_optimization(
 
     # Number formats
     money_cols = ["spend", "ecpp", "ecpi", "effectiveBidFloor", "bidRate", "Recommended bid", "lowTier", "midTier", "highTier"]
-    pct_cols = ["fillRate", "cvr", "ROI D7", "ROI D2nd"]
+    pct_cols = ["fillRate", "cvr", kpi_d7_label, kpi_d2nd_label]
     int_cols = ["preloads", "maxPreloads", "installs", "dailyCap"]
     for r in range(2, ws.max_row + 1):
         for c_idx, col_name in enumerate(export_df.columns, 1):
@@ -627,7 +744,11 @@ def run_optimization(
         "rows_actioned": int(rows_actioned),
         "rows_disregarded": int(rows_disregarded),
         "rows_with_cap": int(rows_with_cap),
-        "roi_d2nd_col": roi_d2nd_label,
+        "kpi_d7_col": d7_col_name,
+        "kpi_d2nd_col": roi_d2nd_label,
+        "kpi_mode": kpi_mode,
+        "kpi_d7_target": kpi_d7,
+        "kpi_d2nd_target": kpi_d2nd,
         "action_breakdown": action_breakdown,
         "segment_breakdown": segment_breakdown,
     }
