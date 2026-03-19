@@ -14,7 +14,7 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 import streamlit as st
-from optimizer import run_optimization, col_letter_to_idx
+from optimizer import run_optimization, col_letter_to_idx, find_kpi_column, ROAS_D7_PATTERNS
 
 st.set_page_config(
     page_title="Campaign Optimizer",
@@ -53,22 +53,22 @@ with col1:
             type=["xlsx"],
             key="internal",
             label_visibility="collapsed",
-            help="Campaign/site-level bid and delivery data. Limit 200MB. XLSX only.",
+            help="Campaign/site-level bid and delivery data (e.g., site_performance.xlsx). Limit 200MB. XLSX only.",
         )
         if not internal_file:
-            st.caption("Drag and drop file here — Limit 200MB per file · XLSX")
+            st.caption("e.g., site_performance.xlsx — Limit 200MB per file · XLSX")
 with col2:
     with st.container():
-        st.caption("Advertiser Performance Report (CSV)")
+        st.caption("Advertiser/Client Performance Report (CSV)")
         advertiser_file = st.file_uploader(
             "Advertiser Performance Report (CSV)",
             type=["csv"],
             key="advertiser",
             label_visibility="collapsed",
-            help="ROAS/ROI performance per site. Limit 200MB. CSV only.",
+            help="ROAS/ROI performance per site from client (e.g., DT_DX.csv). Limit 200MB. CSV only.",
         )
         if not advertiser_file:
-            st.caption("Drag and drop file here — Limit 200MB per file · CSV")
+            st.caption("e.g., DT_DX.csv — Limit 200MB per file · CSV")
 
 st.divider()
 
@@ -77,43 +77,80 @@ st.divider()
 # ---------------------------------------------------------------------------
 st.markdown("### 2 Set Your KPI Goals")
 
+# Preset configurations
+PRESETS = {
+    "Custom": {
+        "main_col": "I",
+        "main_target": 10.0,
+        "secondary_col": "K",
+        "secondary_target": 5.0,
+    },
+    "Domino Dreams ROAS D7 (2.18%)": {
+        "main_col": "Domino Dreams Marketing Campaigns Daily Metrics Full ROAS D7",
+        "main_target": 2.18,
+        "secondary_col": "K",
+        "secondary_target": 5.0,
+    },
+}
+
+preset_choice = st.selectbox(
+    "KPI Preset",
+    options=list(PRESETS.keys()),
+    index=1,  # Default to Domino Dreams preset
+    help="Select a preset configuration or choose Custom to specify your own.",
+)
+
+preset = PRESETS[preset_choice]
+is_custom = preset_choice == "Custom"
+
 k1, k2 = st.columns(2)
 with k1:
-    main_col_letter = st.text_input(
-        "Column letter in the CSV (e.g. I)",
-        value="I",
-        max_chars=2,
+    st.markdown("**Primary KPI (D7 ROAS)**")
+    main_col_spec = st.text_input(
+        "Column (letter or name)",
+        value=preset["main_col"],
         key="main_col",
-        help="Primary KPI column (e.g. ROI D7). Single letter A–Z.",
-    ).strip().upper() or "I"
+        help="Primary KPI column - can be a letter (A-Z, AA-ZZ) or column name (e.g., 'Domino Dreams Marketing Campaigns Daily Metrics Full ROAS D7').",
+        disabled=not is_custom,
+    ).strip() or preset["main_col"]
     main_target = st.number_input(
         "Target (%)",
         min_value=0.0,
         max_value=100.0,
-        value=10.0,
+        value=preset["main_target"],
         step=0.01,
         format="%.2f",
         key="main_target",
-        help="Target percentage for the primary KPI.",
+        help="Target percentage for the primary KPI (e.g., 2.18 for ROAS D7 goal of 2.18%).",
+        disabled=not is_custom,
     )
 with k2:
-    secondary_col_letter = st.text_input(
-        "Column letter in the CSV (e.g. K)",
-        value="K",
-        max_chars=2,
+    st.markdown("**Secondary KPI (D14/D30 ROAS)**")
+    secondary_col_spec = st.text_input(
+        "Column (letter or name)",
+        value=preset["secondary_col"],
         key="secondary_col",
-        help="Secondary KPI column (e.g. ROI D14 or D30). Single letter A–Z.",
-    ).strip().upper() or "K"
+        help="Secondary KPI column - can be a letter (A-Z, AA-ZZ) or column name.",
+        disabled=not is_custom,
+    ).strip() or preset["secondary_col"]
     secondary_target = st.number_input(
         "Target (%)",
         min_value=0.0,
         max_value=100.0,
-        value=5.0,
+        value=preset["secondary_target"],
         step=0.01,
         format="%.2f",
         key="secondary_target",
         help="Target percentage for the secondary KPI.",
+        disabled=not is_custom,
     )
+
+# Use preset values when not custom
+if not is_custom:
+    main_col_spec = preset["main_col"]
+    main_target = preset["main_target"]
+    secondary_col_spec = preset["secondary_col"]
+    secondary_target = preset["secondary_target"]
 
 st.markdown("**How important is the Main KPI compared to the Secondary KPI?**")
 weight_main = st.slider(
@@ -174,26 +211,15 @@ else:
     run_clicked = st.button("🚀 Run Optimization", type="primary", use_container_width=True)
 
 if run_clicked and files_ready:
-    # Validate column letters and targets
-    def valid_col(c, name):
-        c = (c or "").strip().upper()
-        if len(c) != 1 or not c.isalpha():
-            st.error(f"{name} must be a single letter A–Z.")
-            return None
-        return c
-
-    main_col = valid_col(main_col_letter, "Main KPI column")
-    secondary_col = valid_col(secondary_col_letter, "Secondary KPI column")
-    if main_col is None or secondary_col is None:
+    # Validate column specs and targets
+    if not main_col_spec:
+        st.error("Primary KPI column is required (letter or column name).")
+        st.stop()
+    if not secondary_col_spec:
+        st.error("Secondary KPI column is required (letter or column name).")
         st.stop()
     if main_target <= 0 or secondary_target <= 0:
         st.error("KPI targets must be greater than 0.")
-        st.stop()
-    try:
-        kpi_col_d7_idx = col_letter_to_idx(main_col)
-        kpi_col_d2nd_idx = col_letter_to_idx(secondary_col)
-    except ValueError as e:
-        st.error(str(e))
         st.stop()
 
     with st.spinner("Running optimization…"):
@@ -209,13 +235,16 @@ if run_clicked and files_ready:
             output_bytes, summary = run_optimization(
                 internal_file=internal_path,
                 advertiser_file=advertiser_path,
-                kpi_col_d7_idx=kpi_col_d7_idx,
-                kpi_col_d2nd_idx=kpi_col_d2nd_idx,
+                kpi_col_d7_spec=main_col_spec,
+                kpi_col_d2nd_spec=secondary_col_spec,
                 kpi_d7_pct=main_target,
                 kpi_d2nd_pct=secondary_target,
                 weight_main=weight_main / 100.0,
                 weight_secondary=weight_secondary / 100.0,
             )
+        except ValueError as e:
+            st.error(f"Error finding KPI column: {e}")
+            st.stop()
         finally:
             for p in (internal_path, advertiser_path):
                 if p and os.path.isfile(p):
