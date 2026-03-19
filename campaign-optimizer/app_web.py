@@ -9,7 +9,7 @@ import uuid
 from flask import Flask, request, jsonify, send_file, render_template
 from werkzeug.utils import secure_filename
 
-from optimizer import run_optimization, col_letter_to_idx
+from optimizer import run_optimization, col_letter_to_idx, find_kpi_column
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
@@ -21,18 +21,18 @@ _report_store = {}
 def _validate_request(files, form):
     """Return (None, None) if valid, else (None, error_message)."""
     if "internal_file" not in files or not files["internal_file"].filename:
-        return None, "Please upload the Internal Campaign Data (.xlsx) file."
+        return None, "Please upload the Internal Campaign Data (.xlsx) file (e.g., site_performance.xlsx)."
     if "advertiser_file" not in files or not files["advertiser_file"].filename:
-        return None, "Please upload the Advertiser Performance Report (.csv) file."
-    d7 = (form.get("d7_col") or "").strip().upper()
-    if len(d7) != 1 or not d7.isalpha():
-        return None, "ROI D7 Column Letter must be a single letter A–Z."
-    d2nd = (form.get("d2nd_col") or "").strip().upper()
-    if len(d2nd) != 1 or not d2nd.isalpha():
-        return None, "ROI D2nd Column Letter must be a single letter A–Z."
+        return None, "Please upload the Advertiser Performance Report (.csv) file (e.g., DT_DX.csv)."
+    d7_col_spec = (form.get("d7_col") or "").strip()
+    if not d7_col_spec:
+        return None, "ROI D7 Column is required (letter A–Z or column name)."
+    d2nd_col_spec = (form.get("d2nd_col") or "").strip()
+    if not d2nd_col_spec:
+        return None, "ROI D2nd Column is required (letter A–Z or column name)."
     try:
-        kpi_d7 = float(form.get("kpi_d7", 0))
-        kpi_d2nd = float(form.get("kpi_d2nd", 0))
+        kpi_d7 = float(form.get("kpi_d7", 2.18))  # Default to ROAS D7 goal of 2.18%
+        kpi_d2nd = float(form.get("kpi_d2nd", 5.0))
         weight_main = float(form.get("weight_main", 80)) / 100.0
         weight_secondary = float(form.get("weight_secondary", 20)) / 100.0
     except (TypeError, ValueError):
@@ -43,7 +43,7 @@ def _validate_request(files, form):
         return None, "D2nd KPI Target must be greater than 0."
     if abs(weight_main + weight_secondary - 1.0) > 0.01:
         weight_main, weight_secondary = 0.80, 0.20
-    return (d7, d2nd, kpi_d7, kpi_d2nd, weight_main, weight_secondary), None
+    return (d7_col_spec, d2nd_col_spec, kpi_d7, kpi_d2nd, weight_main, weight_secondary), None
 
 
 @app.route("/")
@@ -58,20 +58,14 @@ def run():
     validated, err = _validate_request(files, form)
     if err:
         return jsonify({"error": err}), 400
-    d7_col, d2nd_col, kpi_d7, kpi_d2nd, weight_main, weight_secondary = validated
+    d7_col_spec, d2nd_col_spec, kpi_d7, kpi_d2nd, weight_main, weight_secondary = validated
 
     internal_file = files["internal_file"]
     advertiser_file = files["advertiser_file"]
     if not internal_file.filename.lower().endswith(".xlsx"):
-        return jsonify({"error": "Internal file must be .xlsx"}), 400
+        return jsonify({"error": "Internal file must be .xlsx (e.g., site_performance.xlsx)"}), 400
     if not advertiser_file.filename.lower().endswith(".csv"):
-        return jsonify({"error": "Advertiser file must be .csv"}), 400
-
-    try:
-        kpi_col_d7_idx = col_letter_to_idx(d7_col)
-        kpi_col_d2nd_idx = col_letter_to_idx(d2nd_col)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"error": "Advertiser file must be .csv (e.g., DT_DX.csv)"}), 400
 
     internal_path = None
     advertiser_path = None
@@ -86,8 +80,8 @@ def run():
         output_bytes, summary = run_optimization(
             internal_file=internal_path,
             advertiser_file=advertiser_path,
-            kpi_col_d7_idx=kpi_col_d7_idx,
-            kpi_col_d2nd_idx=kpi_col_d2nd_idx,
+            kpi_col_d7_spec=d7_col_spec,
+            kpi_col_d2nd_spec=d2nd_col_spec,
             kpi_d7_pct=kpi_d7,
             kpi_d2nd_pct=kpi_d2nd,
             weight_main=weight_main,

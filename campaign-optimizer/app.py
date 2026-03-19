@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QFont, QColor, QPalette
 
-from optimizer import run_optimization, col_letter_to_idx
+from optimizer import run_optimization, col_letter_to_idx, find_kpi_column
 
 
 # --- Background worker ---
@@ -24,12 +24,12 @@ class OptimizationWorker(QThread):
     finished = pyqtSignal(object, dict)  # (output_bytes, summary)
     error = pyqtSignal(str)
 
-    def __init__(self, internal_file, advertiser_file, kpi_col_d7_idx, kpi_col_d2nd_idx, kpi_d7_pct, kpi_d2nd_pct):
+    def __init__(self, internal_file, advertiser_file, kpi_col_d7_spec, kpi_col_d2nd_spec, kpi_d7_pct, kpi_d2nd_pct):
         super().__init__()
         self.internal_file = internal_file
         self.advertiser_file = advertiser_file
-        self.kpi_col_d7_idx = kpi_col_d7_idx
-        self.kpi_col_d2nd_idx = kpi_col_d2nd_idx
+        self.kpi_col_d7_spec = kpi_col_d7_spec
+        self.kpi_col_d2nd_spec = kpi_col_d2nd_spec
         self.kpi_d7_pct = kpi_d7_pct
         self.kpi_d2nd_pct = kpi_d2nd_pct
 
@@ -38,8 +38,8 @@ class OptimizationWorker(QThread):
             output_bytes, summary = run_optimization(
                 internal_file=self.internal_file,
                 advertiser_file=self.advertiser_file,
-                kpi_col_d7_idx=self.kpi_col_d7_idx,
-                kpi_col_d2nd_idx=self.kpi_col_d2nd_idx,
+                kpi_col_d7_spec=self.kpi_col_d7_spec,
+                kpi_col_d2nd_spec=self.kpi_col_d2nd_spec,
                 kpi_d7_pct=self.kpi_d7_pct,
                 kpi_d2nd_pct=self.kpi_d2nd_pct,
             )
@@ -103,7 +103,7 @@ class MainWindow(QMainWindow):
         row1.addWidget(lbl_internal)
         self.internal_edit = QLineEdit()
         self.internal_edit.setReadOnly(True)
-        self.internal_edit.setPlaceholderText("No file selected")
+        self.internal_edit.setPlaceholderText("e.g., site_performance.xlsx")
         row1.addWidget(self.internal_edit)
         btn_internal = QPushButton("Browse...")
         btn_internal.setFixedWidth(90)
@@ -112,12 +112,12 @@ class MainWindow(QMainWindow):
         file_layout.addLayout(row1)
 
         row2 = QHBoxLayout()
-        lbl_advertiser = QLabel("Advertiser Performance Report (.csv)")
+        lbl_advertiser = QLabel("Client Performance Report (.csv)")
         lbl_advertiser.setFixedWidth(220)
         row2.addWidget(lbl_advertiser)
         self.advertiser_edit = QLineEdit()
         self.advertiser_edit.setReadOnly(True)
-        self.advertiser_edit.setPlaceholderText("No file selected")
+        self.advertiser_edit.setPlaceholderText("e.g., DT_DX.csv")
         row2.addWidget(self.advertiser_edit)
         btn_advertiser = QPushButton("Browse...")
         btn_advertiser.setFixedWidth(90)
@@ -131,35 +131,33 @@ class MainWindow(QMainWindow):
         kpi_group = QGroupBox("KPI Settings")
         kpi_layout = QGridLayout(kpi_group)
 
-        kpi_layout.addWidget(QLabel("ROI D7 Column Letter"), 0, 0)
+        kpi_layout.addWidget(QLabel("ROI D7 Column (letter or name)"), 0, 0)
         self.d7_col_edit = QLineEdit()
-        self.d7_col_edit.setMaxLength(1)
-        self.d7_col_edit.setText("I")
-        self.d7_col_edit.setMaximumWidth(60)
-        kpi_layout.addWidget(self.d7_col_edit, 0, 1)
+        self.d7_col_edit.setText("Domino Dreams Marketing Campaigns Daily Metrics Full ROAS D7")
+        self.d7_col_edit.setMinimumWidth(300)
+        kpi_layout.addWidget(self.d7_col_edit, 0, 1, 1, 3)
 
-        kpi_layout.addWidget(QLabel("ROI D2nd Column Letter (D14 or D30)"), 0, 2)
+        kpi_layout.addWidget(QLabel("ROI D2nd Column (letter or name)"), 1, 0)
         self.d2nd_col_edit = QLineEdit()
-        self.d2nd_col_edit.setMaxLength(1)
         self.d2nd_col_edit.setText("K")
-        self.d2nd_col_edit.setMaximumWidth(60)
-        kpi_layout.addWidget(self.d2nd_col_edit, 0, 3)
+        self.d2nd_col_edit.setMinimumWidth(300)
+        kpi_layout.addWidget(self.d2nd_col_edit, 1, 1, 1, 3)
 
-        kpi_layout.addWidget(QLabel("D7 KPI Target (%)"), 1, 0)
+        kpi_layout.addWidget(QLabel("D7 KPI Target (%)"), 2, 0)
         self.kpi_d7_spin = QDoubleSpinBox()
         self.kpi_d7_spin.setRange(0, 100)
         self.kpi_d7_spin.setDecimals(2)
         self.kpi_d7_spin.setSingleStep(0.01)
-        self.kpi_d7_spin.setValue(3.36)
-        kpi_layout.addWidget(self.kpi_d7_spin, 1, 1)
+        self.kpi_d7_spin.setValue(2.18)  # ROAS D7 goal
+        kpi_layout.addWidget(self.kpi_d7_spin, 2, 1)
 
-        kpi_layout.addWidget(QLabel("D2nd KPI Target (%)"), 1, 2)
+        kpi_layout.addWidget(QLabel("D2nd KPI Target (%)"), 2, 2)
         self.kpi_d2nd_spin = QDoubleSpinBox()
         self.kpi_d2nd_spin.setRange(0, 100)
         self.kpi_d2nd_spin.setDecimals(2)
         self.kpi_d2nd_spin.setSingleStep(0.01)
-        self.kpi_d2nd_spin.setValue(13.36)
-        kpi_layout.addWidget(self.kpi_d2nd_spin, 1, 3)
+        self.kpi_d2nd_spin.setValue(5.0)
+        kpi_layout.addWidget(self.kpi_d2nd_spin, 2, 3)
 
         main_layout.addWidget(kpi_group)
 
@@ -281,24 +279,24 @@ class MainWindow(QMainWindow):
 
     def _validate(self):
         if not self.internal_path or not self.internal_path.strip():
-            QMessageBox.warning(self, "Validation", "Please select the Internal Campaign Data (.xlsx) file.")
+            QMessageBox.warning(self, "Validation", "Please select the Internal Campaign Data (.xlsx) file (e.g., site_performance.xlsx).")
             return False
         if not os.path.isfile(self.internal_path):
             QMessageBox.warning(self, "Validation", "Internal Campaign Data file does not exist.")
             return False
         if not self.advertiser_path or not self.advertiser_path.strip():
-            QMessageBox.warning(self, "Validation", "Please select the Advertiser Performance Report (.csv) file.")
+            QMessageBox.warning(self, "Validation", "Please select the Client Performance Report (.csv) file (e.g., DT_DX.csv).")
             return False
         if not os.path.isfile(self.advertiser_path):
-            QMessageBox.warning(self, "Validation", "Advertiser Performance Report file does not exist.")
+            QMessageBox.warning(self, "Validation", "Client Performance Report file does not exist.")
             return False
-        d7 = self.d7_col_edit.text().strip().upper()
-        if len(d7) != 1 or not d7.isalpha():
-            QMessageBox.warning(self, "Validation", "ROI D7 Column Letter must be a single letter A–Z.")
+        d7_spec = self.d7_col_edit.text().strip()
+        if not d7_spec:
+            QMessageBox.warning(self, "Validation", "ROI D7 Column is required (letter A–Z or column name).")
             return False
-        d2nd = self.d2nd_col_edit.text().strip().upper()
-        if len(d2nd) != 1 or not d2nd.isalpha():
-            QMessageBox.warning(self, "Validation", "ROI D2nd Column Letter must be a single letter A–Z.")
+        d2nd_spec = self.d2nd_col_edit.text().strip()
+        if not d2nd_spec:
+            QMessageBox.warning(self, "Validation", "ROI D2nd Column is required (letter A–Z or column name).")
             return False
         if self.kpi_d7_spin.value() <= 0:
             QMessageBox.warning(self, "Validation", "D7 KPI Target must be greater than 0.")
@@ -313,21 +311,13 @@ class MainWindow(QMainWindow):
             return
         self.run_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
-        d7_letter = self.d7_col_edit.text().strip().upper()
-        d2nd_letter = self.d2nd_col_edit.text().strip().upper()
-        try:
-            kpi_col_d7_idx = col_letter_to_idx(d7_letter)
-            kpi_col_d2nd_idx = col_letter_to_idx(d2nd_letter)
-        except Exception as e:
-            self.progress_bar.setVisible(False)
-            self.run_btn.setEnabled(True)
-            QMessageBox.critical(self, "Error", f"Invalid column letter: {e}")
-            return
+        d7_col_spec = self.d7_col_edit.text().strip()
+        d2nd_col_spec = self.d2nd_col_edit.text().strip()
         self.worker = OptimizationWorker(
             internal_file=self.internal_path,
             advertiser_file=self.advertiser_path,
-            kpi_col_d7_idx=kpi_col_d7_idx,
-            kpi_col_d2nd_idx=kpi_col_d2nd_idx,
+            kpi_col_d7_spec=d7_col_spec,
+            kpi_col_d2nd_spec=d2nd_col_spec,
             kpi_d7_pct=self.kpi_d7_spin.value(),
             kpi_d2nd_pct=self.kpi_d2nd_spin.value(),
         )

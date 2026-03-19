@@ -34,11 +34,97 @@ def _find_col(df, *candidates):
 
 
 def col_letter_to_idx(letter):
-    """Convert Excel column letter (A–Z) to 0-based index. A=0, B=1, …"""
+    """Convert Excel column letter (A–Z, AA–ZZ) to 0-based index. A=0, B=1, …, AA=26, etc."""
     letter = str(letter).strip().upper()
-    if len(letter) != 1 or not letter.isalpha():
-        raise ValueError(f"Column must be a single letter A–Z, got: {letter!r}")
-    return ord(letter) - ord("A")
+    if not letter or not letter.isalpha():
+        raise ValueError(f"Column must be letters A–Z or AA–ZZ, got: {letter!r}")
+    result = 0
+    for char in letter:
+        result = result * 26 + (ord(char) - ord("A") + 1)
+    return result - 1
+
+
+# Common KPI column name patterns for auto-detection
+ROAS_D7_PATTERNS = [
+    "domino dreams marketing campaigns daily metrics full roas d7",
+    "roas d7",
+    "roi d7",
+    "roas_d7",
+    "roi_d7",
+    "full roas d7",
+]
+
+ROAS_D14_PATTERNS = [
+    "domino dreams marketing campaigns daily metrics full roas d14",
+    "roas d14",
+    "roi d14",
+    "roas_d14",
+    "roi_d14",
+    "full roas d14",
+]
+
+ROAS_D30_PATTERNS = [
+    "domino dreams marketing campaigns daily metrics full roas d30",
+    "roas d30",
+    "roi d30",
+    "roas_d30",
+    "roi_d30",
+    "full roas d30",
+]
+
+
+def find_kpi_column_by_name(df, patterns):
+    """Find a column in df that matches any of the given patterns (case-insensitive).
+    Returns the column index (0-based) or None if not found."""
+    cols_lower = {_norm_col(c).lower(): i for i, c in enumerate(df.columns)}
+    for pattern in patterns:
+        pattern_lower = pattern.lower()
+        # Exact match
+        if pattern_lower in cols_lower:
+            return cols_lower[pattern_lower]
+        # Partial match (pattern contained in column name)
+        for col_name, idx in cols_lower.items():
+            if pattern_lower in col_name:
+                return idx
+    return None
+
+
+def find_kpi_column(df, col_spec):
+    """
+    Find a KPI column by either:
+    - Column letter (A, B, ..., Z, AA, AB, ...)
+    - Column name (partial or exact match, case-insensitive)
+    Returns 0-based column index.
+    """
+    col_spec = str(col_spec).strip()
+    
+    # First try as column letter
+    if col_spec.upper().isalpha() and len(col_spec) <= 2:
+        try:
+            idx = col_letter_to_idx(col_spec)
+            if idx < len(df.columns):
+                return idx
+        except ValueError:
+            pass
+    
+    # Try exact match (case-insensitive)
+    cols_lower = {_norm_col(c).lower(): i for i, c in enumerate(df.columns)}
+    if col_spec.lower() in cols_lower:
+        return cols_lower[col_spec.lower()]
+    
+    # Try partial match (column name contains spec)
+    for col_name, idx in cols_lower.items():
+        if col_spec.lower() in col_name:
+            return idx
+    
+    # Try with known patterns
+    for patterns in [ROAS_D7_PATTERNS, ROAS_D14_PATTERNS, ROAS_D30_PATTERNS]:
+        if col_spec.lower() in [p.lower() for p in patterns]:
+            result = find_kpi_column_by_name(df, patterns)
+            if result is not None:
+                return result
+    
+    raise ValueError(f"Could not find column matching '{col_spec}' in the advertiser file.")
 
 
 def _parse_pct(val):
@@ -90,7 +176,8 @@ def _load_internal(path):
     return df
 
 
-def _load_advertiser(path, kpi_d7_idx, kpi_d2nd_idx):
+def _load_advertiser(path):
+    """Load advertiser/client performance CSV file."""
     df = pd.read_csv(path, encoding="utf-8", encoding_errors="replace")
     df.columns = [_norm_col(c) for c in df.columns]
     return df
@@ -111,8 +198,8 @@ def _ensure_key(df, campaign_col, site_id_col):
 def run_optimization(
     internal_file,
     advertiser_file,
-    kpi_col_d7_idx,
-    kpi_col_d2nd_idx,
+    kpi_col_d7_spec,
+    kpi_col_d2nd_spec,
     kpi_d7_pct,
     kpi_d2nd_pct,
     weight_main=0.80,
@@ -120,7 +207,22 @@ def run_optimization(
 ):
     """
     Run the full optimization pipeline.
-    Returns (output_bytes: BytesIO, summary: dict).
+    
+    Args:
+        internal_file: Path to internal campaign data Excel file (e.g., site_performance.xlsx)
+        advertiser_file: Path to advertiser/client performance CSV file (e.g., DT_DX.csv)
+        kpi_col_d7_spec: Column specification for primary KPI (D7 ROAS) - can be:
+            - Column letter (A, B, ..., Z, AA, etc.)
+            - Column name (exact or partial match, e.g., "Domino Dreams Marketing Campaigns Daily Metrics Full ROAS D7")
+            - 0-based column index (int)
+        kpi_col_d2nd_spec: Column specification for secondary KPI (D14/D30 ROAS)
+        kpi_d7_pct: Target percentage for primary KPI (e.g., 2.18 for 2.18%)
+        kpi_d2nd_pct: Target percentage for secondary KPI
+        weight_main: Weight for primary KPI (0-1, default 0.80)
+        weight_secondary: Weight for secondary KPI (0-1, default 0.20)
+    
+    Returns:
+        (output_bytes: BytesIO, summary: dict)
     """
     weight_main = float(weight_main)
     weight_secondary = float(weight_secondary)
@@ -128,7 +230,18 @@ def run_optimization(
         weight_main, weight_secondary = 0.80, 0.20
 
     internal = _load_internal(internal_file)
-    advertiser = _load_advertiser(advertiser_file, kpi_col_d7_idx, kpi_col_d2nd_idx)
+    advertiser = _load_advertiser(advertiser_file)
+    
+    # Resolve KPI column indices (supports letters, names, or indices)
+    if isinstance(kpi_col_d7_spec, int):
+        kpi_col_d7_idx = kpi_col_d7_spec
+    else:
+        kpi_col_d7_idx = find_kpi_column(advertiser, kpi_col_d7_spec)
+    
+    if isinstance(kpi_col_d2nd_spec, int):
+        kpi_col_d2nd_idx = kpi_col_d2nd_spec
+    else:
+        kpi_col_d2nd_idx = find_kpi_column(advertiser, kpi_col_d2nd_spec)
 
     # --- Internal: column names ---
     campaign_col = _find_col(internal, "campaignName", "campaign_name")
